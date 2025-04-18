@@ -1,36 +1,92 @@
 pipeline {
     agent any
-    stages{
-        stage('build project'){
-            steps{
-                git url:'https://github.com/maheshgajjela221/pro2', branch: "master" 
-                sh 'mvn clean package'
-              
-            }
-        }
-        stage('Build docker image'){
-            steps{
-                script{
-                    sh 'docker build -t maheshgajjela/staragileprojectfinance:v1 .'
-                    sh 'docker images'
-                }
-            }
-        }
-         
-         stage('Docker login') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-pwd', passwordVariable: 'PASS', usernameVariable: 'USER')]) {
-                    sh "echo $PASS | docker login -u $USER --password-stdin"
-                    sh 'docker push maheshgajjela/edurekab1:v1'
-                }
-            }
-        }
-     stage('Deploy') {
-            steps {
-                sh 'sudo docker run -itd --name My-first-containe21211 -p 8083:80 maheshgajjela/staragileprojectfinance:v1'
-                  
-                }
-            }
+
+    environment {
+        REPO_URL = 'https://github.com/maheshgajjela221/pro2'
+        BRANCH = 'master'
+        JAVA_HOME = '/usr/lib/jvm/java-11-openjdk-amd64'
         
+        DOCKER_IMAGE = 'maheshgajjela221/pro2'
+        TEST_SERVER = '44.200.230.243'
+        PROD_SERVER = '3.235.91.97'
+    }
+
+    stages {
+        stage('Checkout & Build JAR') {
+            steps {
+                git branch: "${BRANCH}", url: "${REPO_URL}"
+                sh """
+                mvn clean package -Dmaven.compiler.source=11 -Dmaven.compiler.target=11
+                """
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def jarName = sh(script: "ls target/*.jar | head -1", returnStdout: true).trim()
+                    sh "cp ${jarName} app.jar"
+                }
+
+                withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh """
+                    docker build -t ${DOCKER_IMAGE}:latest .
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    docker push ${DOCKER_IMAGE}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Test Server') {
+            steps {
+                sshagent (credentials: ['ssh-key']) {
+                    sh """
+                    ssh -o StrictHostKeyChecking=no ubuntu@${TEST_SERVER} '
+                        docker pull ${DOCKER_IMAGE}:latest &&
+                        docker stop pro2 || true &&
+                        docker rm pro2 || true &&
+                        docker run -d --name pro2 -p 8080:8080 ${DOCKER_IMAGE}:latest
+                    '
+                    """
+                }
+            }
+        }
+
+        stage('Test Approval') {
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    input message: "App deployed to test at http://${TEST_SERVER}:8080 — Approve to deploy to production?", ok: 'Deploy to Production'
+                }
+            }
+        }
+
+        stage('Deploy to Production Server') {
+            steps {
+                sshagent (credentials: ['ssh-key']) {
+                    sh """
+                    ssh -o StrictHostKeyChecking=no ubuntu@${PROD_SERVER} '
+                        docker pull ${DOCKER_IMAGE}:latest &&
+                        docker stop pro2 || true &&
+                        docker rm pro2 || true &&
+                        docker run -d --name pro2 -p 8080:8080 ${DOCKER_IMAGE}:latest
+                    '
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+            echo "Pipeline completed."
+        }
+        success {
+            echo "Deployment successful!"
+        }
+        failure {
+            echo "Deployment failed."
+        }
     }
 }
